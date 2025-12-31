@@ -1,0 +1,55 @@
+#!/bin/bash
+
+if [ -n "$1" ]; then
+    if [ "$1" == "--help" ] || [ "$1" == "-h" ]; then
+        echo "Usage: harbor.sh [number_of_harbors] [harbor_path] [harbor_name]"
+        exit 0
+    fi
+    HARBOR_COUNT=$1
+else
+    HARBOR_COUNT=3
+fi
+
+if [ -n "$2" ]; then
+  HARBOR_PATH=$(realpath "$2")
+else
+    HARBOR_PATH=$(pwd)
+fi
+
+if [ -n "$3" ]; then
+    HARBOR_NAME="$3"
+else
+    HARBOR_NAME=$(basename ${HARBOR_PATH} | tr ' ' '_')
+fi
+
+pushd ${HARBOR_PATH} >/dev/null
+docker compose config >/dev/null || { echo "Error: Invalid docker-compose file in ${HARBOR_PATH}"; exit 1; }
+
+# Find the first unused 10.11.X.0/24 subnet across all docker networks
+# List all docker container IPs and find used subnets
+USED_SUBNETS=$(docker network ls -q | xargs -I {} docker network inspect {} --format '{{range .Containers}}{{.IPv4Address}}{{"\n"}}{{end}}' | grep -E '10\.11\.[0-9]+\.[0-9]+' | sort -u)
+# Loop from 1 to 254 to find an unused subnet
+HARBOR_ID=1
+for i in $(seq 1 254); do
+    if ! echo "$USED_SUBNETS" | grep -q "10.11.$i."; then
+        HARBOR_ID=$i
+        break
+    fi
+done
+
+docker network rm harbor_net_${HARBOR_NAME} 2>/dev/null
+docker network create --subnet 10.11.${HARBOR_ID}.0/24 harbor_net_${HARBOR_NAME}
+
+# List exposed ports
+ports=$(docker compose ${HARBOR_PATH} | grep 'published: \"' | cut -d '"' -f2)
+
+last_id=""
+for i in $(seq 1 $HARBOR_COUNT); do
+  ports_list=""
+  for port in ${ports}; do
+    ports_list="${ports_list} -p ${port}:$((${port} + $i))"
+  done
+  last_id=$(docker run --rm --privileged -dt --network harbor_net_${HARBOR_NAME} --ip 10.11.${HARBOR_ID}.$(($i + 1)) ${ports_list} --name harbor-${HARBOR_NAME}-$i -v ${HARBOR_PATH}:/mount:ro harbor)
+done
+
+docker logs -f $last_id

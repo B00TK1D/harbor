@@ -1,23 +1,33 @@
 #!/bin/bash
 
+ACTION="help"
 if [ -n "$1" ]; then
-    if [ "$1" == "--help" ] || [ "$1" == "-h" ]; then
-        echo "Usage: harbor.sh [number_of_harbors] [harbor_path] [harbor_name]"
-        exit 0
+    if [ "$1" == "up" ]; then
+        ACTION="up"
+      elif [ "$1" == "down" ]; then
+        ACTION="down"
     fi
-    HARBOR_COUNT=$1
-else
-    HARBOR_COUNT=3
+fi
+
+if [ "$ACTION" == "help" ]; then
+    echo "Usage: harbor <up|down> [replica_count] [compose_path] [harbor_name]"
+    exit 0
 fi
 
 if [ -n "$2" ]; then
-  HARBOR_PATH=$(realpath "$2")
+    REPLICA_COUNT=$2
+else
+    REPLICA_COUNT=3
+fi
+
+if [ -n "$3" ]; then
+  HARBOR_PATH=$(realpath "$3")
 else
     HARBOR_PATH=$(pwd)
 fi
 
-if [ -n "$3" ]; then
-    HARBOR_NAME="$3"
+if [ -n "$4" ]; then
+    HARBOR_NAME="$4"
 else
     HARBOR_NAME=$(basename ${HARBOR_PATH} | tr ' ' '_')
 fi
@@ -37,19 +47,35 @@ for i in $(seq 1 254); do
     fi
 done
 
-docker network rm harbor_net_${HARBOR_NAME} 2>/dev/null
-docker network create --subnet 10.11.${HARBOR_ID}.0/24 harbor_net_${HARBOR_NAME}
 
-# List exposed ports
-ports=$(docker compose ${HARBOR_PATH} | grep 'published: \"' | cut -d '"' -f2)
+if [ "$ACTION" == "up" ]; then
+    echo "Starting Harbor replicas..."
+    docker network rm harbor_net_${HARBOR_NAME} 2>/dev/null
+    docker network create --subnet 10.11.${HARBOR_ID}.0/24 harbor_net_${HARBOR_NAME}
 
-last_id=""
-for i in $(seq 1 $HARBOR_COUNT); do
-  ports_list=""
-  for port in ${ports}; do
-    ports_list="${ports_list} -p ${port}:$((${port} + $i))"
-  done
-  last_id=$(docker run --rm --privileged -dt --network harbor_net_${HARBOR_NAME} --ip 10.11.${HARBOR_ID}.$(($i + 1)) ${ports_list} --name harbor-${HARBOR_NAME}-$i -v ${HARBOR_PATH}:/mount:ro harbor)
-done
+    # List exposed ports
+    ports=$(docker compose ${HARBOR_PATH} | grep 'published: \"' | cut -d '"' -f2)
 
-docker logs -f $last_id
+    last_id=""
+    for i in $(seq 1 $REPLICA_COUNT); do
+      ports_list=""
+      for port in ${ports}; do
+        ports_list="${ports_list} -p ${port}:$((${port} + $i))"
+      done
+      last_id=$(docker run --rm --privileged -dt --network harbor_net_${HARBOR_NAME} --ip 10.11.${HARBOR_ID}.$(($i + 1)) ${ports_list} --name harbor-${HARBOR_NAME}-$i -v ${HARBOR_PATH}:/mount:ro harbor)
+    done
+
+    docker logs -f $last_id | sed '/Attaching to /{q}'
+
+    echo "Harbor up, replicas available:"
+    for i in $(seq 1 $REPLICA_COUNT); do
+      echo "  - 10.11.${HARBOR_ID}.$(($i + 1)) (harbor-${HARBOR_NAME}-$i)"
+    done
+
+elif [ "$ACTION" == "down" ]; then
+    echo "Stopping Harbor replicas..."
+    for i in $(seq 1 $REPLICA_COUNT); do
+      docker rm -f harbor-${HARBOR_NAME}-$i 2>/dev/null
+    done
+    docker network rm harbor_net_${HARBOR_NAME} 2>/dev/null
+fi

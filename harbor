@@ -32,6 +32,8 @@ else
     HARBOR_NAME=$(basename ${HARBOR_PATH} | tr ' ' '_')
 fi
 
+HARBOR_HASH=$(echo -n "${HARBOR_PATH}" | md5sum | cut -c1-8)
+
 pushd ${HARBOR_PATH} >/dev/null
 docker compose config >/dev/null || { echo "Error: Invalid docker-compose file in ${HARBOR_PATH}"; exit 1; }
 
@@ -49,27 +51,39 @@ done
 
 
 if [ "$ACTION" == "up" ]; then
+
+    # Check if harbor registry is running
+    if ! docker inspect harbor-registry >/dev/null 2>&1; then
+        echo "Staring harbor registry container..."
+        # This is a docker registry that caches all harbor images for faster startup
+        docker run -d --restart=always --name harbor-registry --hostname registry -v harbor-registry:/var/lib/registry registry:2
+    fi
+
+
     echo "Starting Harbor replicas..."
     docker network rm harbor_net_${HARBOR_NAME} 2>/dev/null
-    docker network create --subnet 10.11.${HARBOR_ID}.0/24 harbor_net_${HARBOR_NAME}
+    docker network create --subnet 10.11.${HARBOR_ID}.0/24 harbor-net-${HARBOR_NAME}
 
-    # List exposed ports
-    ports=$(docker compose ${HARBOR_PATH} | grep 'published: \"' | cut -d '"' -f2)
+    docker network connect harbor-net-${HARBOR_NAME} harbor-registry
+
 
     last_id=""
+    build_needed="true"
     for i in $(seq 1 $REPLICA_COUNT); do
-      ports_list=""
-      for port in ${ports}; do
-        ports_list="${ports_list} -p ${port}:$((${port} + $i))"
-      done
-      last_id=$(docker run --rm --privileged -dt --network harbor_net_${HARBOR_NAME} --ip 10.11.${HARBOR_ID}.$(($i + 1)) ${ports_list} --name harbor-${HARBOR_NAME}-$i -v ${HARBOR_PATH}:/mount:ro harbor)
+      echo "Starting harbor-${HARBOR_NAME}-$i at 10.11.${HARBOR_ID}.$(($i + 2))"
+      last_id=$(docker run --rm --privileged -dt --network harbor-net-${HARBOR_NAME} --ip 10.11.${HARBOR_ID}.$(($i + 2)) -e BUILD_HARBOR=${build_needed} -e HARBOR_HASH=${HARBOR_HASH} --name harbor-${HARBOR_NAME}-$i -v ${HARBOR_PATH}:/mount:ro harbor)
+      if [ "$build_needed" == "false" ]; then
+        continue
+      fi
+      docker logs -f $last_id | sed '/Docker containers created./{q}'
+      build_needed="false"
     done
 
     docker logs -f $last_id | sed '/Attaching to /{q}'
 
     echo "Harbor up, replicas available:"
     for i in $(seq 1 $REPLICA_COUNT); do
-      echo "  - 10.11.${HARBOR_ID}.$(($i + 1)) (harbor-${HARBOR_NAME}-$i)"
+      echo "  - 10.11.${HARBOR_ID}.$(($i + 2)) (harbor-${HARBOR_NAME}-$i)"
     done
 
 elif [ "$ACTION" == "down" ]; then
@@ -77,5 +91,6 @@ elif [ "$ACTION" == "down" ]; then
     for i in $(seq 1 $REPLICA_COUNT); do
       docker rm -f harbor-${HARBOR_NAME}-$i 2>/dev/null
     done
-    docker network rm harbor_net_${HARBOR_NAME} 2>/dev/null
+    docker network disconnect harbor-net-${HARBOR_NAME} harbor-registry 2>/dev/null
+    docker network rm harbor-net-${HARBOR_NAME} 2>/dev/null
 fi

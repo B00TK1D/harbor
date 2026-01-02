@@ -18,6 +18,7 @@ RUN apt update && \
   apt install -y --no-install-recommends docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin && \
   apt clean && rm -rf /var/lib/apt/lists/*
 
+COPY ./buildkitd.toml /etc/buildkit/buildkitd.toml
 
 VOLUME /mount
 RUN mkdir /host

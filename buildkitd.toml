@@ -1,0 +1,12 @@
+[worker.oci]
+  gc = true
+
+[worker.oci.cache]
+  enabled = true
+
+[exporter.image]
+  push = true
+
+[registry."registry:5000"]
+  http = true
+  insecure = true
